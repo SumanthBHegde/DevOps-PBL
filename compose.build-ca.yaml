@@ -1,0 +1,8 @@
+services:
+  app:
+    build:
+      secrets:
+        - build_ca_bundle
+secrets:
+  build_ca_bundle:
+    file: ${BUILD_CA_BUNDLE:?Set BUILD_CA_BUNDLE to your system CA bundle}
