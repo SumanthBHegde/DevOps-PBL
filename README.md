@@ -25,6 +25,20 @@ Stop the services with `docker compose down`. PostgreSQL data persists in the na
 
 See [PROJECT_REPORT.md](PROJECT_REPORT.md) for the architecture, API contract, and validation results.
 
+## Run the end-to-end tests
+
+The Playwright suite in `e2e/` tests the running stack through the browser and the REST API. Start the stack first, then:
+
+```sh
+cd e2e
+npm ci
+npx playwright install chromium
+npm test              # UI and API tests
+npm run test:docker   # also recreates containers and stops the database
+```
+
+Set `BASE_URL` to test a different address (default `http://localhost:8000`). `npm run test:docker` runs `docker compose` against this repository's stack, so use it locally only. `npm run report` opens the HTML report.
+
 ### Build behind a TLS-inspecting proxy
 
 If the package registries use your organization's trusted proxy certificate, pass the system CA bundle to the build:
