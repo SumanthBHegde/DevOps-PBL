@@ -30,6 +30,8 @@ class ShortLink(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     with psycopg.connect(DATABASE_URL) as conn:
+        # Serialize schema initialization when several API pods start together.
+        conn.execute("SELECT pg_advisory_xact_lock(23001)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS links (
                 code text PRIMARY KEY,
