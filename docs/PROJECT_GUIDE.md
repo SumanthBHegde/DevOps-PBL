@@ -261,16 +261,21 @@ DevOps-PBL/
 
 ### How the image is built (`Dockerfile`)
 
-The Dockerfile has **two stages**. This keeps the final image small.
+The Dockerfile has **two stages**. This keeps the final image small, because the Node.js build tools are thrown away after stage 1.
 
-1. **Stage 1 (Node.js):** install the JavaScript libraries and build the web page into plain files (`dist/`).
-2. **Stage 2 (Python):** install the Python libraries, copy in `app.py` and the built page, and start Uvicorn.
+| Stage | Base image | What it does |
+|---|---|---|
+| 1. `frontend` | `node:22-bookworm-slim` | Installs the JavaScript libraries (`npm ci`) and builds the web page into plain files (`dist/`) |
+| 2. final | `python:3.12-slim-bookworm` | Installs the Python libraries (`pip install -r requirements.txt`), copies in `app.py` and the built `dist/` folder, and starts Uvicorn on port 8000 |
+
+The final image contains only Python, the libraries, `app.py` and the built page. It does not contain Node.js or the `e2e/` tests (`.dockerignore` leaves them out).
 
 Safety and size choices:
 
-- The app runs as a normal user (number 10001), not as the all-powerful `root` user.
-- All versions are fixed (pinned), so a build today matches a build next month.
-- Uvicorn keeps idle connections open for 75 seconds (`--timeout-keep-alive 75`). This matches the Ingress, so it never reuses a connection the app has just closed.
+- **Not root.** The app runs as user number 10001 (`USER 10001:10001`), not as the all-powerful `root` user.
+- **Pinned versions.** Every Python and JavaScript library has an exact version (`requirements.txt`, `package-lock.json`). The base images are pinned to a version line (Node 22, Python 3.12, Debian bookworm), so they still get security patches when rebuilt.
+- **Keep-alive.** Uvicorn keeps idle connections open for 75 seconds (`--timeout-keep-alive 75`). That is longer than the Ingress's 60 seconds, so the Ingress never reuses a connection the app has just closed.
+- **Company proxies.** Both install steps can read an optional build secret called `build_ca_bundle`. Behind a proxy that inspects HTTPS traffic, pass your company's certificate file with `compose.build-ca.yaml` (Compose) or `--secret id=build_ca_bundle,src=/etc/ssl/certs/ca-certificates.crt` (plain `docker build`). Without it, the secret is simply skipped.
 
 ---
 
@@ -288,13 +293,22 @@ docker compose up --build --wait
 
 Open **http://localhost:8000**.
 
-What Compose does:
+What `compose.yaml` sets up:
 
-- Builds the app image from the `Dockerfile`.
-- Starts PostgreSQL and waits until it is healthy.
-- Starts the app and waits until `/health` says OK.
-- Saves links in a volume called `pgdata`, so they survive restarts.
-- Only listens on your own computer (`127.0.0.1`), not your whole network.
+| Service | Image | Health check | Other settings |
+|---|---|---|---|
+| `db` | `postgres:17-bookworm` | `pg_isready` every 3 s | User and database `shortener`; data in the `pgdata` volume |
+| `app` | Built from the `Dockerfile` | Calls `/health` every 5 s | Port `127.0.0.1:8000`; starts only after `db` is healthy (`depends_on: condition: service_healthy`) |
+
+What happens when you run it:
+
+- Compose builds the app image from the `Dockerfile`.
+- It starts PostgreSQL and waits until `pg_isready` passes.
+- It starts the app, and `--wait` returns once `/health` says OK.
+- The app finds the database by the service name `db`. This is the same idea as service discovery in Kubernetes.
+- Links are saved in the `pgdata` volume, so they survive restarts.
+- The app only listens on your own computer (`127.0.0.1`), not your whole network.
+- If you do not set a password, Compose uses the development default `shortener-local`. That is fine on your laptop but not for anything shared.
 
 Try the API from a terminal:
 
@@ -355,16 +369,47 @@ ansible-playbook -i localhost, ansible/deploy.yml \
   -e kube_context=minikube -e app_image=url-shortener:project23
 ```
 
+**What the parts of this command mean:**
+
+| Part | Meaning |
+|---|---|
+| `-i localhost,` | The inventory: the list of machines Ansible works on. Here it is only your own computer. The trailing comma tells Ansible this is a list, not a file name. |
+| `ansible/deploy.yml` | The playbook to run |
+| `-e kube_context=minikube` | Which cluster to deploy to (a context name from `kubectl config get-contexts`). Required. |
+| `-e app_image=url-shortener:project23` | Which app image the pods should run. Required. |
+
+**How it works.** The playbook runs on your computer (`connection: local`) and does all its work by running `kubectl` commands. So you need `kubectl` and `ansible-core` installed, but not the Python `kubernetes` library or the `kubernetes.core` Ansible collection.
+
 The playbook does these steps in order:
 
-1. Checks you passed `kube_context` and `app_image`.
-2. Creates the `url-shortener` namespace.
-3. Checks if a database password already exists.
-4. If not, makes a random 40-character password and stores it in the `shortener-db` Secret. The password is never printed or saved in Git.
-5. Applies `database.yaml` and `api.yaml.j2` (filling in the image name and host name).
-6. Waits until the database and API are fully running.
+| # | Task | What it does | When it counts as "changed" |
+|---|---|---|---|
+| 1 | Require the target context and application image | Stops with an error if `kube_context` or `app_image` is missing | Never |
+| 2 | Ensure the application namespace exists | `kubectl apply` of the `url-shortener` namespace | Only if it was created |
+| 3 | Check for an existing database credential | Looks for the `shortener-db` Secret | Never (read only) |
+| 4 | Initialize a password once | If there is no Secret, makes a random 40-character password (letters and digits) and creates the Secret. `no_log` hides it from the output. | Only on the first deploy |
+| 5 | Apply the database, services, API, autoscaler and ingress | Fills in the templates and runs `kubectl apply` for `k8s/database.yaml` and `k8s/api.yaml.j2` | Only if something was created or changed |
+| 6 | Wait for deployments to become ready | `kubectl rollout status` for `shortener-db` and `shortener-api`, up to 5 minutes each | Never |
 
 Run it a second time and it reports `changed=0`. That means it is **idempotent**: it only changes what is different.
+
+**Settings you can change** with `-e name=value`:
+
+| Variable | Default | Used for |
+|---|---|---|
+| `kube_context` | none (required) | Which cluster |
+| `app_image` | none (required) | The API image in the Deployment |
+| `ingress_host` | `shortener.test` | The host name in the Ingress |
+| `ingress_class` | `nginx` | Which Ingress controller handles it |
+
+The namespace is fixed to `url-shortener` inside the playbook (`app_namespace`). To skip the final wait, add `--skip-tags rollout`.
+
+**What the playbook does not do (yet):**
+
+- It does not build the image or load it into the cluster. You do that in step 2.
+- It does not run a smoke test (create a link and follow it) at the end.
+- There is no teardown playbook. To remove everything, delete the namespace (section 12).
+- There is no inventory file or roles. It is a single playbook file.
 
 ### Step 4: Open the app
 
@@ -399,11 +444,31 @@ ansible-playbook -i localhost, ansible/deploy.yml \
   -e kube_context=minikube -e app_image=url-shortener:v2
 ```
 
-Kubernetes swaps the pods one by one (a rolling update). In our tests this caused zero failed requests, even under heavy load.
+Kubernetes swaps the pods a few at a time (a rolling update, using the default limits of 25% extra and 25% unavailable). With 2 pods, it starts one new pod, waits until it is ready, then removes an old one. In our tests this caused zero failed requests, even under heavy load.
 
 ---
 
 ## 9. How the Kubernetes setup works
+
+### 9.0 Every Kubernetes object, in one table
+
+All of these live in the `url-shortener` namespace.
+
+| Object | Name | From file | Key settings |
+|---|---|---|---|
+| Namespace | `url-shortener` | Created by Ansible | Holds everything below |
+| Secret | `shortener-db` | Created by Ansible | Key `password`: random, 40 characters |
+| Service | `db` | `k8s/database.yaml` | Port 5432, points at pods labelled `app: shortener-db` |
+| PersistentVolumeClaim | `shortener-data` | `k8s/database.yaml` | 1 GiB, ReadWriteOnce (one node at a time) |
+| Deployment | `shortener-db` | `k8s/database.yaml` | 1 replica, `postgres:17-bookworm`, strategy `Recreate`, data in `/var/lib/postgresql/data/pgdata` on the PVC |
+| Service | `shortener-api` | `k8s/api.yaml.j2` | Port 80 to the pods' port 8000, points at pods labelled `app: shortener-api` |
+| Deployment | `shortener-api` | `k8s/api.yaml.j2` | Your `app_image`; requests 100m CPU and 96Mi memory (no limits); probes; `preStop` sleep 5 s; `DB_POOL_MAX=10` |
+| HorizontalPodAutoscaler | `shortener-api` | `k8s/api.yaml.j2` | 2 to 8 replicas, 65% CPU |
+| Ingress | `shortener` | `k8s/api.yaml.j2` | Host `shortener.test`, class `nginx`, path `/` to `shortener-api` |
+
+**Why one file ends in `.j2`.** `api.yaml.j2` is a Jinja2 template. Ansible fills in three values before applying it: `{{ app_image }}`, `{{ ingress_class }}` and `{{ ingress_host }}`. `database.yaml` has nothing to fill in. Because of these placeholders, apply `api.yaml.j2` through Ansible, not directly with `kubectl apply`.
+
+**Why the API Deployment has no `replicas` number.** The HPA owns the replica count. If the Deployment also set one, every Ansible run would reset it.
 
 ### 9.1 Service discovery: how the API finds the database
 
@@ -459,10 +524,15 @@ The Ingress sends every request for host `shortener.test` to the `shortener-api`
 
 ### 9.6 Health checks (probes)
 
-| Probe | What it checks | What happens if it fails |
-|---|---|---|
-| Readiness, `GET /health` every 5 s | Can this pod reach the database? | The pod stops getting traffic until it recovers |
-| Liveness, TCP port 8000 every 15 s | Is the program still listening? | Kubernetes restarts the pod |
+| Pod | Probe | What it checks | What happens if it fails |
+|---|---|---|---|
+| API | Readiness, `GET /health` every 5 s, 4 s timeout | Can this pod reach the database? | The pod stops getting traffic until it recovers |
+| API | Liveness, TCP port 8000 every 15 s | Is the program still listening? | Kubernetes restarts the pod |
+| Database | Readiness, `pg_isready` | Is PostgreSQL accepting connections? | The `db` Service stops sending connections to it |
+
+The API's liveness probe deliberately does not use `/health`. If it did, a database outage would make Kubernetes restart every API pod, which would not help.
+
+The database has no liveness probe. If PostgreSQL crashes, the container exits and Kubernetes restarts it anyway.
 
 `/health` runs on its own database connection, separate from normal requests, so it still answers quickly when the app is busy.
 
