@@ -2,7 +2,9 @@
 
 Branch `integrate/upstream-k8s` at commit `70161e1`, tested 27 Nov 2026. The stack was deployed with the Ansible playbook, verified, run through the Playwright suite, load tested with k6 (ramp and spike), and put through three disruption tests: deleting an API pod, deleting the database pod, and a rolling update. No application code or manifests were changed during testing.
 
-**Summary.** Deployment, service discovery, persistence and autoscaling all work. Under load the API fails often. Without a connection pool, Postgres rejects or times out new connections from about 50 concurrent users. On the spike profile, the readiness probe times out and the Ingress is left with no endpoints at all. About 22% of requests failed on the ramp profile and 70% on the spike profile.
+**Update after fixes.** Bugs B1 to B5, plus a keep-alive mismatch found while retesting (B7), are fixed on branch `fix/load-rollout-clipboard`. The ramp profile now runs at about 200 req/s with 0 failed requests, and the spike profile drops from 70.5% to 0% failed. See [section 7](#7-after-fixes). Sections 1 to 6 describe the original run on commit `70161e1`.
+
+**Summary of the original run.** Deployment, service discovery, persistence and autoscaling all work. Under load the API fails often. Without a connection pool, Postgres rejects or times out new connections from about 50 concurrent users. On the spike profile, the readiness probe times out and the Ingress is left with no endpoints at all. About 22% of requests failed on the ramp profile and 70% on the spike profile.
 
 ## 1. Environment
 
@@ -261,3 +263,50 @@ docker run --rm --network host -e TARGETS=http://$(minikube ip) -e HOST=shortene
 ```
 
 For the spike test, run the same `docker run` with `PROFILE=spike`. Watch the autoscaler with `kubectl -n url-shortener get hpa -w`.
+
+## 7. After fixes
+
+Fixes on branch `fix/load-rollout-clipboard`, tested on the same minikube cluster with images `url-shortener:project23-c` (B1 to B5) and `url-shortener:project23-d` (adds B7).
+
+### What changed
+
+| Bug | Fix | Files |
+|---|---|---|
+| B1 startup crash | Schema setup retries for up to 30 s (`DB_STARTUP_TIMEOUT`) instead of exiting | `app.py` |
+| B2 no connection pool | `psycopg_pool.ConnectionPool` per pod (max 10, `DB_POOL_MAX`; 10 s wait, `DB_POOL_TIMEOUT`). Connections are checked before use, and pool timeouts return 503. 8 replicas x 11 connections = 88, under the 97 available | `app.py`, `requirements.txt`, `k8s/api.yaml.j2` |
+| B3 readiness probe | `/health` is async and uses its own one-connection async pool, so it never waits behind request threads | `app.py` |
+| B4 rollout drops | `preStop` runs `sleep 5`, so pods keep serving while they are removed from endpoints | `k8s/api.yaml.j2` |
+| B5 Copy over HTTP | Falls back to a hidden textarea and `execCommand('copy')` when the Clipboard API is unavailable. The UI test now checks the copied text on both paths | `frontend/main.jsx`, `e2e/tests/ui.spec.js` |
+| B6 HPA lag | Environment only. The README documents lowering metrics-server resolution to 15 s | `README.md` |
+| B7 keep-alive mismatch (new) | Uvicorn `--timeout-keep-alive 75`, longer than ingress-nginx's 60 s upstream keepalive. Before this, nginx occasionally reused a connection uvicorn had just closed and got `Connection reset by peer`; idempotent GETs were retried, POSTs returned 502 | `Dockerfile` |
+
+### Results
+
+| Run | Start replicas | Requests | Req/s | p50 | p95 | p99 | Failed | Before fixes |
+|---|---|---|---|---|---|---|---|---|
+| Ramp (`-c`) | 2 | 34962 | 208 | 184 ms | 682 ms | 1.01 s | 0 | 21.7% failed, p95 3.20 s, 42 req/s |
+| Ramp, repeat (`-c`) | 2 | 34075 | 203 | 201 ms | 672 ms | 928 ms | 0 | |
+| Spike (`-c`) | 2 | 13602 | 164 | 1.36 s | 3.40 s | 4.95 s | 1 (0.007%, a 502 from B7) | 70.5% failed, p95 9.50 s |
+| Spike (`-d`) | 4 | 18287 | 221 | 687 ms | 3.20 s | 4.67 s | 0 | |
+| Ramp with rolling update `-c` to `-d` | 2 | 31353 | 187 | 145 ms | 1.04 s | 1.61 s | 0 | 2 x 502, 32.4% failed |
+| Ramp with db pod deletion (`-d`) | 8 | 39508 | 235 | 161 ms | 606 ms | 839 ms | 2 (both 503 during the 5 s restart) | 20.0% failed |
+
+**Run conditions.** Runs went back to back without waiting for scale-down, so some started above 2 replicas. All runs had 0 `too many clients` errors. The highest sampled Postgres connection count was 89, which is 88 from the pools plus the monitor's own session.
+
+### Acceptance checks after the fixes
+
+| ID | Before | After | Evidence |
+|---|---|---|---|
+| FR-6 | Fail via Ingress | Pass | Playwright through `http://shortener.test`: 22 passed, 2 skipped (Docker only). On Compose with `npm run test:docker`: 24 of 24 passed, including the database outage test. |
+| NFR-5 / B1 | Pods restarted once on fresh deploy | Pass | Fresh namespace deploy: 0 restarts. API pod started while Postgres was scaled to 0: logged `Database not ready, retrying schema setup`, then `Application startup complete`, 0 restarts. |
+| NFR-6 | Fail | Pass | 0 `too many clients` across 6 runs and about 172,000 requests. |
+| NFR-8 | Fail | Fail (better) | Ramp p95 for all requests is 606 to 682 ms on this 4-CPU cluster, where k6 shares the host. That is still above 200 ms, though about 5 times faster than before. |
+| K8-2 | Pass | Pass | db pod deleted under load. Only 4 failed requests (2 k6, 2 probe), all between t+1.7 s and t+4.8 s. Marker link intact; 35623 links kept. |
+| K8-9 | Fail | Pass | Playbook rolled out `project23-d` under ramp load: 0 failed requests in k6 and the probe, 0 ingress errors. |
+| EX-4 | Pass ramp, fail spike | Pass ramp; spike no longer fails | The HPA still lags about 60 s with the default metrics-server resolution, but pods stay Ready, so the spike causes slower responses instead of errors. |
+| AN-7 | Pass | Pass | Fresh deploy `changed=3 failed=0`, second run `changed=0`. |
+
+### Not fixed
+
+- **Specification and structure gaps:** the PRD mismatches in section 5 (names, StatefulSet, ConfigMap, HPA bounds), FR-8 (`X-Served-By`), EX-8 (TLS), and the Ansible structure items (AN-1 to AN-3, AN-5, AN-9). These are missing features or naming decisions, not bugs.
+- **K8-5 liveness probe:** still a TCP check. A liveness probe on `/health` would restart every API pod during a database outage.

@@ -28,6 +28,16 @@ test('declares an inline favicon so browsers do not request /favicon.ico', async
 });
 
 test('creates a short link and copies it to the clipboard', async ({ page, baseURL }) => {
+  // On plain HTTP (for example an Ingress host) the app copies with execCommand,
+  // which the Clipboard API cannot read back, so record what that path copies.
+  await page.addInitScript(() => {
+    const execCommand = document.execCommand.bind(document);
+    document.execCommand = (command, ...args) => {
+      if (command === 'copy') window.copiedText = document.activeElement?.value;
+      return execCommand(command, ...args);
+    };
+  });
+  await page.reload();
   await shorten(page, 'https://example.com/guide');
 
   const link = page.locator('.result a');
@@ -35,7 +45,9 @@ test('creates a short link and copies it to the clipboard', async ({ page, baseU
 
   await page.getByRole('button', { name: 'Copy' }).click();
   await expect(page.getByRole('status')).toHaveText('Copied to clipboard.');
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(await link.textContent());
+  const copied = await page.evaluate(() =>
+    window.isSecureContext ? navigator.clipboard.readText() : window.copiedText);
+  expect(copied).toBe(await link.textContent());
 });
 
 test('short link redirects to the destination with query and fragment', async ({ page, baseURL }) => {
