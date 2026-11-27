@@ -2,6 +2,8 @@
 
 A React web interface and FastAPI REST API that turn HTTP and HTTPS destinations into short links. PostgreSQL stores the links in a Docker volume.
 
+New to the project? Start with the [Project Guide](docs/PROJECT_GUIDE.md), which explains every part in plain language.
+
 ## Run locally
 
 Install Docker Engine or Docker Desktop with Docker Compose v2. From the repository root, run:
