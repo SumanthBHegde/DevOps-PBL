@@ -1,3 +1,4 @@
+import logging
 import os
 import secrets
 import string
@@ -7,13 +8,14 @@ from typing import Annotated
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl, StringConstraints
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 ALPHABET = string.ascii_letters + string.digits
 DIST = Path(__file__).parent / "dist"
+log = logging.getLogger("uvicorn.error")
 Code = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9]{8}$")]
 
 
@@ -41,6 +43,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="URL Shortener", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=DIST / "assets"), name="assets")
+
+
+@app.exception_handler(psycopg.OperationalError)
+def database_unavailable(request: Request, exc: psycopg.OperationalError) -> JSONResponse:
+    log.warning("Database unavailable during %s %s: %s", request.method, request.url.path, exc)
+    return JSONResponse({"detail": "Database unavailable"}, status_code=503)
 
 
 @app.get("/", include_in_schema=False)

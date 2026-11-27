@@ -115,7 +115,7 @@ Build a URL shortener as a three-tier system. Containerize it, run it on Kuberne
 | NFR-6 | The API uses a connection pool so scaling out does not exhaust Postgres's `max_connections` | Must | ❌ Not met (one connection per request) |
 | NFR-7 | Secrets (database password) are not hard-coded in manifests or committed in plain text | Must | ⚠️ Compose uses a dev default |
 | NFR-8 | The API answers p95 < 200 ms for redirects at the load-test rate on a local cluster | Should | ❓ Not measured |
-| NFR-9 | Automated tests run on every push (CI) | Should | ❌ Not started |
+| NFR-9 | Automated tests run on every push (CI) | Should | ⚠️ Playwright suite in `e2e/` (24 tests); not yet in CI |
 
 ## 7. Platform and DevOps requirements
 
@@ -187,7 +187,7 @@ Build a URL shortener as a three-tier system. Containerize it, run it on Kuberne
 | **0. Setup** | Repository, fork, upstream remote, problem-statement mapping | | ✅ Done |
 | **1. Application (Client → API → DB)** | React UI, FastAPI endpoints, Postgres schema, input validation | FR-1 to FR-6, FR-9, NFR-4 | ✅ Done |
 | **2. Docker** | Multi-stage image, Compose with health checks, persistent volume, proxy CA support | DK-1 to DK-4, NFR-1 to NFR-3 (Compose) | ✅ Done (built and checked upstream; not yet re-run in this fork) |
-| **3. App hardening for Kubernetes** | `BASE_URL` / `--proxy-headers`, connection pool, move schema creation out of app startup, `X-Served-By` header, `.env.example`, unit tests | FR-7, FR-8, NFR-5, NFR-6, NFR-9 (partly) | ⏳ Next, not started |
+| **3. App hardening for Kubernetes** | `BASE_URL` / `--proxy-headers`, connection pool, move schema creation out of app startup, `X-Served-By` header, `.env.example` (done), E2E tests (done), CI | FR-7, FR-8, NFR-5, NFR-6, NFR-9 | ⏳ In progress |
 | **4. Kubernetes base** | Namespace, Secret, ConfigMap, Postgres StatefulSet + PVC + headless Service, schema Job, API Deployment + Service, image loading | DK-5, K8-1 to K8-9, NFR-3 (K8s), NFR-7 | ❌ Not started |
 | **5. Ansible automation** | Inventory, roles (prereqs, build_image, k8s_deploy, smoke_test), Vault, teardown | AN-1 to AN-9 | ❌ Not started |
 | **6. Extension: HPA + Ingress** | metrics-server, HPA, ingress-nginx, Ingress, load-test script, optional TLS | EX-1 to EX-8 | ❌ Not started |
